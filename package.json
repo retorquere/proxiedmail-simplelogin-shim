@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
+    "dprint": "^0.54.0",
     "wrangler": "^4.20.3"
   }
 }
