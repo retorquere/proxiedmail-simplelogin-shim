@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sl-shim",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-07",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "PROXIEDMAIL_BASE_URL": "https://proxiedmail.com"
+  }
+}

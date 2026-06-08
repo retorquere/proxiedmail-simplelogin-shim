@@ -1,0 +1,1842 @@
+openapi: 3.0.0
+servers:
+  - url: https://proxiedmail.com/
+info:
+  description: ProxiedMail API — create and manage proxy email addresses that forward incoming mail to your real addresses, with support for webhooks and browsable email history.
+  version: 1.0.0
+  title: ProxiedMail API
+  license:
+    name: GPL
+    url: https://www.gnu.org/licenses/quick-guide-gplv3.html
+paths:
+  /api/v1/callback:
+    post:
+      tags:
+        - callback
+      summary: Register a webhook callback URL
+      description: Registers a callback URL that will be called when a new email is received by a proxy binding that has a callback URL set.
+      operationId: addCallback
+      responses:
+        "200":
+          $ref: "#/components/responses/CallbackCreatedResponse"
+      security:
+        - api_auth:
+            - default
+
+  /api/v1/callback/get/{hash}:
+    get:
+      parameters:
+        - name: hash
+          in: path
+          description: Hash identifier of the callback to retrieve
+          required: true
+          schema:
+            type: string
+      tags:
+        - callback
+      summary: Retrieve callback payload by hash
+      description: Returns the payload received by a registered callback, including processing status and any data sent to the callback URL.
+      responses:
+        "200":
+          $ref: "#/components/responses/CallbackPayloadResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/received-emails-links/{proxyBindingId}:
+    get:
+      parameters:
+        - name: proxyBindingId
+          in: path
+          description: ID of the proxy binding whose received emails to list
+          required: true
+          schema:
+            type: string
+      tags:
+        - received-email
+      summary: Get received emails list by proxy email (last 55)
+      description: Returns a list of the most recent 55 received-email link objects for the given proxy binding. The proxy binding must have is_browsable set to true.
+      responses:
+        "200":
+          $ref: "#/components/responses/ReceivedEmailLinksResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/received-emails/{receivedEmailId}:
+    get:
+      parameters:
+        - name: receivedEmailId
+          in: path
+          description: ID of the received email to retrieve
+          required: true
+          schema:
+            type: string
+      tags:
+        - received-email
+      summary: Get content of received email by id
+      description: Returns the full message payload of a specific received email, including headers, body (HTML and plain-text), and attachments.
+      responses:
+        "200":
+          $ref: "#/components/responses/ReceivedEmailDetailsResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/proxy-bindings:
+    get:
+      tags:
+        - proxy-binding
+      summary: List proxy email bindings
+      description: Returns all proxy-email bindings for the authenticated user, along with account quota metadata (used and available proxy bindings).
+      parameters:
+        - name: sort
+          in: query
+          description: Optional sort direction used by the frontend. The current UI requests `desc`.
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+      responses:
+        "200":
+          $ref: "#/components/responses/ProxyBindingListResponse"
+      security:
+        - api_key:
+            - default
+    post:
+      tags:
+        - proxy-binding
+      summary: Create a proxy email binding
+      description: Creates a new proxy-email binding. Specify the desired proxy address, one or more real addresses to forward to, and optionally a callback URL, browsable flag, and wildcard auto-create setting.
+      operationId: addProxyBinding
+      responses:
+        "201":
+          $ref: "#/components/responses/ProxyBindingResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/ProxyBindingCreateRequest"
+
+  /api/v1/proxy-bindings/{id}:
+    patch:
+      parameters:
+        - name: id
+          in: path
+          description: ID of the proxy-email binding to update
+          required: true
+          schema:
+            type: string
+      tags:
+        - proxy-binding
+      summary: Update a proxy email binding
+      description: Updates an existing proxy-email binding. real_addresses is a map of address string to an object with is_enabled boolean (true = add/enable, false = disable). proxy_address and id must also be included for the update to take effect. The frontend also updates received_emails, description, wildcard_auto_create, and new_real_address through this endpoint.
+      operationId: patchProxyBinding
+      responses:
+        "200":
+          $ref: "#/components/responses/ProxyBindingResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/ProxyBindingUpdateRequest"
+    delete:
+      parameters:
+        - name: id
+          in: path
+          description: ID of the proxy-email binding to delete
+          required: true
+          schema:
+            type: string
+      tags:
+        - proxy-binding
+      summary: Delete a proxy email binding
+      description: Permanently deletes the specified proxy-email binding. Incoming mail to the proxy address will no longer be forwarded.
+      operationId: deleteProxyBinding
+      responses:
+        "200":
+          description: Proxy email binding deleted successfully
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/api-token:
+    get:
+      tags:
+        - api
+      summary: Get API token
+      description: Returns the long-lived API token for the authenticated user. Authenticate this request using the Bearer token obtained from POST /api/v1/auth. Use the returned token in the Token header for all subsequent requests.
+      responses:
+        "200":
+          $ref: "#/components/responses/ApiTokenResponse"
+      security:
+        - api_auth:
+            - default
+
+  /api/v1/auth:
+    post:
+      tags:
+        - user
+      summary: Authenticate and obtain a Bearer token
+      description: Authenticates with username and password and returns a short-lived OAuth Bearer token. Use this token to call GET /api/v1/api-token to obtain the long-lived API token.
+      operationId: userAuth
+      responses:
+        "200":
+          $ref: "#/components/responses/OauthTokenResponse"
+        "401":
+          description: Invalid username or password
+          $ref: "#/components/responses/ErrorResponse"
+      requestBody:
+        $ref: "#/components/requestBodies/AuthRequest"
+
+  /api/v1/users:
+    post:
+      tags:
+        - user
+      summary: Register a new user
+      description: Creates a new user account from the landing page registration flow.
+      operationId: createUser
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "201":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "422":
+          description: Registration failed validation, for example because captcha verification failed.
+          $ref: "#/components/responses/ErrorResponse"
+      requestBody:
+        $ref: "#/components/requestBodies/UserRegistrationRequest"
+
+  /api/v1/users/me:
+    get:
+      tags:
+        - user
+      summary: Get current user profile
+      description: Returns the currently authenticated user profile and frontend metadata such as plan status and 2FA enablement.
+      operationId: getCurrentUser
+      parameters:
+        - name: updateFrontCache
+          in: query
+          description: When set to `1`, refreshes the frontend cache used by the web UI.
+          required: false
+          schema:
+            type: integer
+            enum: [0, 1]
+      responses:
+        "200":
+          $ref: "#/components/responses/UserMeResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/users/allow-microsoft-domains:
+    get:
+      tags:
+        - user
+      summary: Check Microsoft-domain availability
+      description: Returns whether Microsoft-hosted email domains are currently allowed for the authenticated account.
+      operationId: getMicrosoftDomainAllowance
+      responses:
+        "200":
+          $ref: "#/components/responses/MicrosoftDomainsResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/users/remove-2fa:
+    delete:
+      tags:
+        - two-factor
+      summary: Disable two-factor authentication
+      description: Removes two-factor authentication from the authenticated user account.
+      operationId: removeTwoFactor
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "204":
+          description: Two-factor authentication removed successfully
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/resend-confirmation:
+    post:
+      tags:
+        - user
+      summary: Resend email confirmation
+      description: Resends an email verification message to the specified email address.
+      operationId: resendConfirmation
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/ResendConfirmationRequest"
+
+  /api/v1/stat-events:
+    post:
+      tags:
+        - analytics
+      summary: Record a frontend analytics event
+      description: Accepts lightweight frontend event names used for UI funnels and modal interactions. The web app sends either an authenticated token or a guest identifier.
+      operationId: createStatEvent
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "201":
+          $ref: "#/components/responses/GenericObjectResponse"
+      requestBody:
+        $ref: "#/components/requestBodies/StatEventRequest"
+
+  /api/v1/product-tips:
+    get:
+      tags:
+        - product-tip
+      summary: Get product tips or upgrade prompts
+      description: Returns product-tip content shown by the dashboard, such as upgrade or promotional modal content.
+      operationId: getProductTips
+      responses:
+        "200":
+          $ref: "#/components/responses/ProductTipsResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/emails/replace:
+    post:
+      tags:
+        - real-email
+      summary: Replace a real email address
+      description: Replaces one real forwarding address with another across the user's proxy bindings.
+      operationId: replaceRealEmail
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/EmailReplaceRequest"
+
+  /api/v1/2fa-sms:
+    post:
+      tags:
+        - two-factor
+      summary: Start SMS-based two-factor setup
+      description: Sends an SMS confirmation code to the supplied phone number to begin enabling SMS-based 2FA.
+      operationId: startSmsTwoFactor
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/TwoFactorSmsRequest"
+
+  /api/v1/confirm-sms:
+    post:
+      tags:
+        - two-factor
+      summary: Confirm SMS-based two-factor setup
+      description: Validates the SMS confirmation code and returns recovery codes when setup succeeds.
+      operationId: confirmSmsTwoFactor
+      responses:
+        "200":
+          $ref: "#/components/responses/TwoFactorConfirmResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/TwoFactorCodeRequest"
+
+  /api/v1/2fa-google:
+    post:
+      tags:
+        - two-factor
+      summary: Start Google Authenticator two-factor setup
+      description: Creates a Google Authenticator secret and QR code for the authenticated user.
+      operationId: startGoogleTwoFactor
+      responses:
+        "200":
+          $ref: "#/components/responses/GoogleTwoFactorSetupResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/TwoFactorGoogleRequest"
+
+  /api/v1/confirm-google:
+    post:
+      tags:
+        - two-factor
+      summary: Confirm Google Authenticator two-factor setup
+      description: Validates the OTP generated by Google Authenticator and returns recovery codes when setup succeeds.
+      operationId: confirmGoogleTwoFactor
+      responses:
+        "200":
+          $ref: "#/components/responses/TwoFactorConfirmResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/TwoFactorCodeRequest"
+
+  /api/v1/ask-form:
+    post:
+      tags:
+        - support
+      summary: Submit the public ask form
+      description: Accepts the public website contact form submitted from the marketing page.
+      operationId: submitAskForm
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "201":
+          $ref: "#/components/responses/GenericObjectResponse"
+      requestBody:
+        $ref: "#/components/requestBodies/AskFormRequest"
+
+  /api/v1/proxy-bindings/{bindingId}/contacts:
+    get:
+      parameters:
+        - name: bindingId
+          in: path
+          description: ID of the proxy binding whose contacts to list
+          required: true
+          schema:
+            type: string
+      tags:
+        - contact
+      summary: List contacts for a proxy binding
+      description: Returns all contacts for a given proxy binding. Contacts are email addresses that can send mail via the proxy address using their assigned reverse proxy address.
+      operationId: listContacts
+      responses:
+        "200":
+          $ref: "#/components/responses/ProxyBindingContactListResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+
+  /api/v1/contacts:
+    post:
+      tags:
+        - contact
+      summary: Create a contact for a proxy binding
+      description: Creates a new contact linking a recipient email to a proxy binding. The contact is assigned a reverse proxy address they can send from so that outgoing mail appears to come from the proxy address.
+      operationId: createContact
+      responses:
+        "201":
+          $ref: "#/components/responses/ProxyBindingContactResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_key:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/ProxyBindingContactCreateRequest"
+
+  /gapi/passwords/proxy-binding:
+    patch:
+      tags:
+        - password
+      summary: Set a password for a proxy binding
+      description: Sets or replaces the password associated with a proxy binding.
+      operationId: setProxyBindingPassword
+      responses:
+        "200":
+          $ref: "#/components/responses/ProxyBindingPasswordResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/ProxyBindingPasswordSetRequest"
+
+  /gapi/available-domains:
+    get:
+      tags:
+        - domain
+      summary: List selectable domains for new proxy addresses
+      description: Returns the domain options shown in the proxy-creation UI, including built-in and user-available domains.
+      operationId: listAvailableDomains
+      responses:
+        "200":
+          $ref: "#/components/responses/AvailableDomainsResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+
+  /gapi/custom-domains:
+    get:
+      tags:
+        - domain
+      summary: List available custom domains
+      description: Returns the list of custom domains available to the authenticated user. The domains pdxmail.net, pdxmail.com and proxiedmail.com are always available and are not included in this response.
+      operationId: listCustomDomains
+      parameters:
+        - name: ignoreProcessing
+          in: query
+          description: When set to 1, includes domains that are still being processed.
+          required: false
+          schema:
+            type: integer
+            enum: [0, 1]
+      responses:
+        "200":
+          $ref: "#/components/responses/CustomDomainsResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+
+  /gapi/proxy-binding/reverse-lookup:
+    get:
+      tags:
+        - proxy-binding
+      summary: Reverse-lookup a reverse proxy address
+      description: Resolves a reverse proxy address back to the related proxy binding data.
+      operationId: reverseLookupProxyBinding
+      parameters:
+        - name: reverseAddress
+          in: query
+          description: Reverse proxy address to resolve.
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ReverseLookupResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+
+  /gapi/settings:
+    get:
+      tags:
+        - settings
+      summary: Get UI settings
+      description: Returns saved frontend settings such as password generation preferences.
+      operationId: getSettings
+      responses:
+        "200":
+          $ref: "#/components/responses/SettingsResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+
+  /gapi/settings/update:
+    patch:
+      tags:
+        - settings
+      summary: Update UI settings
+      description: Persists frontend settings such as password generator options.
+      operationId: updateSettings
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/SettingsUpdateRequest"
+
+  /gapi/passwords:
+    get:
+      tags:
+        - password
+      summary: List saved proxy-binding passwords
+      description: Returns passwords saved for proxy bindings in the dashboard.
+      operationId: listProxyBindingPasswords
+      responses:
+        "200":
+          $ref: "#/components/responses/PasswordListResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+
+  /gapi/used-on:
+    get:
+      tags:
+        - proxy-binding
+      summary: List websites associated with proxy bindings
+      description: Returns saved website or service names for each proxy binding.
+      operationId: listUsedOnEntries
+      responses:
+        "200":
+          $ref: "#/components/responses/UsedOnListResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+    patch:
+      tags:
+        - proxy-binding
+      summary: Update websites associated with a proxy binding
+      description: Saves the website or service labels attached to a proxy binding.
+      operationId: updateUsedOnEntries
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObjectResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+      requestBody:
+        $ref: "#/components/requestBodies/UsedOnUpdateRequest"
+
+  /gapi/real-emails:
+    get:
+      tags:
+        - real-email
+      summary: List real email addresses
+      description: Returns the authenticated user's real forwarding addresses.
+      operationId: listRealEmails
+      responses:
+        "200":
+          $ref: "#/components/responses/RealEmailsResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+
+  /gapi/verified-emails-list:
+    get:
+      tags:
+        - real-email
+      summary: List verified email addresses
+      description: Returns the email addresses the frontend treats as verified and available for selection.
+      operationId: listVerifiedEmails
+      responses:
+        "200":
+          $ref: "#/components/responses/VerifiedEmailsResponse"
+        "401":
+          description: "Unauthorized — invalid or missing API token"
+          $ref: "#/components/responses/ErrorResponse"
+      security:
+        - api_auth:
+            - default
+
+externalDocs:
+  description: Find out more about Swagger
+  url: http://swagger.io
+
+components:
+  schemas:
+    OauthAccessToken:
+      description: OAuth Bearer token issued after successful authentication, used to obtain the long-lived API token via GET /api/v1/api-token.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - oauth-access-tokens
+            id:
+              type: string
+            attributes:
+              type: object
+              properties:
+                token:
+                  type: string
+                expires_at:
+                  type: string
+                2fa_granted:
+                  type: integer
+                  format: int32
+                isNewAcc:
+                  type: boolean
+            relationships:
+              type: object
+              properties:
+                user:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                        id:
+                          type: string
+
+    ProxyBinding:
+      description: A single proxy-email binding entity representing one proxy address that forwards incoming mail to one or more real addresses.
+      properties:
+        type:
+          type: string
+          enum:
+            - proxy_bindings
+        id:
+          type: string
+        attributes:
+          type: object
+          properties:
+            real_addresses:
+              type: object
+              description: Map of real email address to its forwarding configuration.
+              additionalProperties:
+                type: object
+                properties:
+                  is_enabled:
+                    type: boolean
+                  is_verification_needed:
+                    type: boolean
+                  is_verified:
+                    type: boolean
+            proxy_address:
+              type: string
+            is_browsable:
+              type: boolean
+              description: Whether received emails can be retrieved via the API.
+            received_emails:
+              type: integer
+              format: int32
+            description:
+              type: string
+            callback_url:
+              type: string
+            wildcard_auto_create:
+              type: boolean
+            wildcard_auto_create_on:
+              type: boolean
+            created_at:
+              type: string
+            updated_at:
+              type: string
+        relationships:
+          type: object
+          properties:
+            user:
+              type: object
+              properties:
+                data:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    id:
+                      type: string
+
+    ProxyBindingCreate:
+      description: Request body for creating a new proxy-email binding.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - "proxy_bindings"
+            attributes:
+              type: object
+              properties:
+                real_addresses:
+                  type: array
+                  description: List of real email addresses to forward incoming mail to.
+                  items:
+                    type: string
+                proxy_address:
+                  type: string
+                  description: The desired proxy email address (e.g. "alias@proxiedmail.com").
+                is_browsable:
+                  type: boolean
+                  description: Whether received emails should be retrievable via the API.
+                callback_url:
+                  type: string
+                  description: Optional URL to POST to when a new email is received.
+                wildcard_auto_create:
+                  type: boolean
+                  description: Whether wildcard proxy addresses should be auto-created for this binding.
+
+    ProxyBindingUpdate:
+      description: Request body for partially updating an existing proxy-email binding. real_addresses is a map of address string to an object with is_enabled boolean. proxy_address must be included in attributes for real_addresses changes to take effect.
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              description: ID of the proxy-email binding being updated.
+            type:
+              type: string
+              enum:
+                - "proxy_bindings"
+            attributes:
+              type: object
+              required:
+                - proxy_address
+              properties:
+                real_addresses:
+                  type: object
+                  description: Map of real email address to its forwarding configuration — set is_enabled to true to add/enable, false to disable.
+                  additionalProperties:
+                    type: object
+                    properties:
+                      is_enabled:
+                        type: boolean
+                proxy_address:
+                  type: string
+                  description: The proxy address of this binding. Must be included when updating real_addresses.
+                description:
+                  type: string
+                callback_url:
+                  type: string
+                received_emails:
+                  type: integer
+                  format: int32
+                wildcard_auto_create:
+                  type: boolean
+                new_real_address:
+                  type: string
+
+    CallbackCreated:
+      description: Confirmation payload returned when a callback URL is successfully registered.
+      properties:
+        status:
+          type: string
+        call_url:
+          type: string
+        get_url:
+          type: string
+        id:
+          type: string
+
+    AuthCredentials:
+      description: User credentials payload for the authentication endpoint.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - "auth-request"
+            attributes:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+
+    ProxyBindingContact:
+      description: A contact linking a recipient email to a proxy binding, with an assigned reverse proxy address for outbound sending.
+      properties:
+        type:
+          type: string
+          enum:
+            - proxy_binding_contacts
+        id:
+          type: string
+        attributes:
+          type: object
+          properties:
+            status:
+              type: integer
+              format: int32
+            recipient_email:
+              type: string
+            reverse_proxy_address:
+              type: string
+              description: The address the contact should send from to have mail appear as coming from the proxy address.
+            description:
+              type: string
+        relationships:
+          type: object
+          properties:
+            proxy_binding:
+              type: object
+              properties:
+                data:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    id:
+                      type: string
+            reverse_proxy_binding:
+              type: object
+              properties:
+                data:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    id:
+                      type: string
+            user:
+              type: object
+              properties:
+                data:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    id:
+                      type: string
+
+    ProxyBindingContactCreate:
+      description: Request body for creating a new contact for a proxy binding.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - proxy_binding_contacts
+            attributes:
+              type: object
+              required:
+                - recipient_email
+              properties:
+                recipient_email:
+                  type: string
+                  description: The email address of the contact.
+                description:
+                  type: string
+                  description: Optional human-readable label for this contact.
+            relationships:
+              type: object
+              required:
+                - proxy_binding
+              properties:
+                proxy_binding:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          enum:
+                            - proxy_bindings
+                        id:
+                          type: string
+                          description: ID of the proxy binding this contact belongs to.
+
+    ProxyBindingPasswordSet:
+      description: Request body for setting a password on a proxy binding.
+      properties:
+        proxy_binding_id:
+          type: string
+          description: ID of the proxy binding to set the password for.
+        password:
+          type: string
+          description: The password to set.
+      required:
+        - proxy_binding_id
+        - password
+
+    CustomDomain:
+      description: A custom domain available to the user for creating proxy email addresses.
+      properties:
+        id:
+          type: string
+        user_id:
+          type: integer
+          format: int32
+        domain:
+          type: string
+        display_name:
+          type: string
+        status:
+          type: integer
+          format: int32
+        isShared:
+          type: boolean
+        isPremium:
+          type: boolean
+        dkimKey:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        verification_hash:
+          type: string
+        spf:
+          type: string
+
+    CallbackPayload:
+      description: Payload stored for a registered callback, including processing status and any data received.
+      properties:
+        status:
+          type: string
+        payload:
+          type: object
+          nullable: true
+        code:
+          type: string
+        is_received:
+          type: boolean
+        method:
+          type: string
+          nullable: true
+
+    UserRegistrationCreate:
+      description: Request body for the public user-registration flow.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - users
+            attributes:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                keyLandingPage:
+                  type: string
+                v:
+                  type: string
+      required:
+        - data
+
+    UserMe:
+      description: Minimal user profile shape returned by the dashboard bootstrap request.
+      properties:
+        meta:
+          type: object
+          properties:
+            plan:
+              type: object
+              properties:
+                isPaid:
+                  type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            type:
+              type: string
+            attributes:
+              type: object
+              properties:
+                username:
+                  type: string
+                email:
+                  type: string
+                2fa_enabled:
+                  type: boolean
+              additionalProperties: true
+
+    SettingEntry:
+      description: Key-value pair used by the frontend settings endpoints.
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+
+    SettingsUpdate:
+      description: Request body for updating frontend settings.
+      properties:
+        settings:
+          type: array
+          items:
+            $ref: "#/components/schemas/SettingEntry"
+      required:
+        - settings
+
+    StatEvent:
+      description: Analytics event payload sent by the frontend.
+      properties:
+        event:
+          type: string
+      required:
+        - event
+
+    ResendConfirmation:
+      description: Request body for resending an email confirmation.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - confirmation
+            attributes:
+              type: object
+              properties:
+                email:
+                  type: string
+      required:
+        - data
+
+    EmailReplace:
+      description: Request body for replacing one real email with another.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - replace-real-emails
+            attributes:
+              type: object
+              properties:
+                oldEmail:
+                  type: string
+                newEmail:
+                  type: string
+      required:
+        - data
+
+    TwoFactorSmsSetup:
+      description: Request body for starting SMS-based 2FA setup.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - users_2fa
+            attributes:
+              type: object
+              properties:
+                phone:
+                  type: string
+                type_2fa:
+                  type: integer
+                  enum: [1]
+      required:
+        - data
+
+    TwoFactorGoogleSetup:
+      description: Request body for starting Google Authenticator 2FA setup.
+      properties:
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - users_2fa
+            attributes:
+              type: object
+              properties:
+                email:
+                  type: string
+                type_2fa:
+                  type: integer
+                  enum: [2]
+      required:
+        - data
+
+    TwoFactorCode:
+      description: Request body for confirming a 2FA setup code.
+      properties:
+        data:
+          type: object
+          properties:
+            code:
+              type: string
+      required:
+        - data
+
+    GoogleTwoFactorSetup:
+      description: QR-code and secret returned when Google Authenticator setup starts.
+      properties:
+        qr_url:
+          type: string
+        secret:
+          type: string
+
+    TwoFactorConfirmation:
+      description: Confirmation payload returned after successfully validating a 2FA code.
+      properties:
+        data:
+          type: object
+          properties:
+            attributes:
+              type: object
+              properties:
+                codes:
+                  type: array
+                  items:
+                    type: string
+
+    PasswordEntry:
+      description: Saved password entry associated with a proxy binding.
+      properties:
+        related_to_id:
+          type: string
+        password:
+          type: string
+
+    UsedOnEntry:
+      description: Saved list of websites or services associated with a proxy binding.
+      properties:
+        proxy_binding_id:
+          type: string
+        list:
+          type: array
+          items:
+            type: string
+
+    UsedOnUpdate:
+      description: Request body for updating websites associated with a proxy binding.
+      properties:
+        proxy_binding_id:
+          type: string
+        list:
+          type: array
+          items:
+            type: string
+      required:
+        - proxy_binding_id
+        - list
+
+    RealEmailEntry:
+      description: Real email address entry used by the manage-real-emails dashboard.
+      properties:
+        email:
+          type: string
+        is_verified:
+          type: boolean
+        is_default:
+          type: boolean
+      additionalProperties: true
+
+    AvailableDomainEntry:
+      description: Domain entry selectable in the proxy-creation UI.
+      properties:
+        domain:
+          type: string
+        display_name:
+          type: string
+        isPremium:
+          type: boolean
+        isShared:
+          type: boolean
+      additionalProperties: true
+
+    MicrosoftDomainsAvailability:
+      description: Response indicating whether Microsoft-hosted real-email domains are allowed.
+      properties:
+        status:
+          type: boolean
+
+    ProductTip:
+      description: Product-tip content rendered by the dashboard promotional modal.
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        img:
+          type: string
+          nullable: true
+        cta:
+          type: string
+          nullable: true
+      additionalProperties: true
+
+    ProductTipsEnvelope:
+      description: Product-tip wrapper returned by the dashboard tip endpoint.
+      properties:
+        data:
+          type: object
+          properties:
+            attributes:
+              $ref: "#/components/schemas/ProductTip"
+      additionalProperties: true
+
+    ReverseLookup:
+      description: Result of resolving a reverse proxy address back to its proxy binding.
+      properties:
+        proxy_address:
+          type: string
+        send_from:
+          type: string
+      additionalProperties: true
+
+    VerifiedEmailsList:
+      description: Verified email addresses returned for the proxy-creation and management UI.
+      properties:
+        List:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+
+  responses:
+    ErrorResponse:
+      description: "API error response — message and exception details are included in the body."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              properties:
+                data:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    type:
+                      type: string
+                    attributes:
+                      type: object
+                      properties:
+                        message:
+                          type: string
+                        exception:
+                          type: string
+                        file:
+                          type: string
+                        line:
+                          type: integer
+                          format: int32
+
+    ReceivedEmailLinksResponse:
+      description: "List of link objects for received emails associated with a proxy binding (up to the last 55)."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    id:
+                      type: string
+                    attributes:
+                      type: object
+                      properties:
+                        recipient_email:
+                          type: string
+                        sender_email:
+                          type: string
+                        subject:
+                          type: string
+                        attachmentsCounter:
+                          type: integer
+                          format: int32
+                        link:
+                          type: string
+                          description: Relative path to the full email details endpoint.
+                        is_processed:
+                          type: boolean
+                        created_at:
+                          type: string
+                        updated_at:
+                          type: string
+
+    ReceivedEmailDetailsResponse:
+      description: "Full message payload of a specific received email, including headers, HTML and plain-text body, and attachments."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: object
+                properties:
+                  type:
+                    type: string
+                  id:
+                    type: string
+                  attributes:
+                    type: object
+                    properties:
+                      recipient_email:
+                        type: string
+                      sender_email:
+                        type: string
+                      payload:
+                        type: object
+                        properties:
+                          To:
+                            type: string
+                          From:
+                            type: string
+                          Subject:
+                            type: string
+                          recipient:
+                            type: string
+                          sender:
+                            type: string
+                          body-html:
+                            type: string
+                          body-plain:
+                            type: string
+                          attachments:
+                            type: string
+                            nullable: true
+                      attachments:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            url:
+                              type: string
+                      is_processed:
+                        type: boolean
+                      created_at:
+                        type: string
+                      updated_at:
+                        type: string
+
+    CallbackCreatedResponse:
+      description: "Callback registration confirmation containing the webhook call URL and the retrieval URL."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CallbackCreated"
+
+    ProxyBindingListResponse:
+      description: "Paginated list of proxy-email bindings with account quota metadata (used and available slots)."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              meta:
+                type: object
+                properties:
+                  usedProxyBindings:
+                    type: integer
+                    format: int32
+                  availableProxyBindings:
+                    type: integer
+                    format: int32
+                  isVerificationEmailSend:
+                    type: boolean
+              data:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProxyBinding"
+        application/vnd.api+json:
+          schema:
+            type: object
+            properties:
+              meta:
+                type: object
+                properties:
+                  usedProxyBindings:
+                    type: integer
+                    format: int32
+                  availableProxyBindings:
+                    type: integer
+                    format: int32
+                  isVerificationEmailSend:
+                    type: boolean
+              data:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProxyBinding"
+
+    ApiTokenResponse:
+      description: "Long-lived API token for use in the Token request header for all subsequent API calls."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              token:
+                type: string
+        application/vnd.api+json:
+          schema:
+            type: object
+            properties:
+              token:
+                type: string
+
+    ProxyBindingResponse:
+      description: "Single proxy-email binding returned after a successful create or update operation, with associated metadata."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              meta:
+                type: object
+                properties:
+                  isVerificationEmailSend:
+                    type: boolean
+                  firstProxyBinding:
+                    type: boolean
+              data:
+                $ref: "#/components/schemas/ProxyBinding"
+
+    ProxyBindingContactListResponse:
+      description: "List of contacts for a proxy binding."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProxyBindingContact"
+
+    ProxyBindingContactResponse:
+      description: "Single contact returned after successful creation."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                $ref: "#/components/schemas/ProxyBindingContact"
+
+    ProxyBindingPasswordResponse:
+      description: "Confirmation that the password was set successfully."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+
+    CallbackPayloadResponse:
+      description: "Callback entry including its processing status and the payload data received at the callback URL."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CallbackPayload"
+
+    OauthTokenResponse:
+      description: "OAuth Bearer token issued upon successful authentication. Pass this in the Authorization header to call GET /api/v1/api-token."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OauthAccessToken"
+        application/vnd.api+json:
+          schema:
+            $ref: "#/components/schemas/OauthAccessToken"
+
+    CustomDomainsResponse:
+      description: "Array of custom domains available to the authenticated user."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/CustomDomain"
+
+    GenericObjectResponse:
+      description: "Generic JSON object response for endpoints whose exact response shape is not fully constrained by the frontend code."
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+
+    UserMeResponse:
+      description: "Authenticated user profile and plan metadata used to bootstrap the dashboard."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UserMe"
+        application/vnd.api+json:
+          schema:
+            $ref: "#/components/schemas/UserMe"
+
+    GoogleTwoFactorSetupResponse:
+      description: "QR code URL and secret returned when Google Authenticator setup begins."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GoogleTwoFactorSetup"
+
+    TwoFactorConfirmResponse:
+      description: "Confirmation payload containing recovery codes after successful 2FA verification."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TwoFactorConfirmation"
+
+    SettingsResponse:
+      description: "List of saved frontend settings as key-value pairs."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/SettingEntry"
+
+    PasswordListResponse:
+      description: "List of passwords saved for proxy bindings."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/PasswordEntry"
+
+    UsedOnListResponse:
+      description: "List of website or service labels saved for proxy bindings."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/UsedOnEntry"
+
+    RealEmailsResponse:
+      description: "List of real forwarding email addresses."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RealEmailEntry"
+
+    AvailableDomainsResponse:
+      description: "List of domain options available in the proxy-creation UI."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              oneOf:
+                - type: string
+                - $ref: "#/components/schemas/AvailableDomainEntry"
+
+    MicrosoftDomainsResponse:
+      description: "Indicates whether Microsoft-hosted domains are currently allowed for real email addresses."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MicrosoftDomainsAvailability"
+
+    ProductTipsResponse:
+      description: "Promotional or upgrade modal content used by the dashboard."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/ProductTip"
+
+    ReverseLookupResponse:
+      description: "Proxy binding information resolved from a reverse proxy address."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ReverseLookup"
+
+    VerifiedEmailsResponse:
+      description: "List of verified email addresses exposed to the frontend as the `List` field."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/VerifiedEmailsList"
+
+  requestBodies:
+    ProxyBindingCreateRequest:
+      description: Payload for creating a new proxy-email binding.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProxyBindingCreate"
+
+    AuthRequest:
+      description: User credentials for authentication.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthCredentials"
+
+    ProxyBindingUpdateRequest:
+      description: Payload for partially updating an existing proxy-email binding. real_addresses values are booleans (true = add/enable, false = disable).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProxyBindingUpdate"
+
+    ProxyBindingPasswordSetRequest:
+      description: Payload for setting a password on a proxy binding.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProxyBindingPasswordSet"
+
+    ProxyBindingContactCreateRequest:
+      description: Payload for creating a new contact for a proxy binding.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProxyBindingContactCreate"
+
+    UserRegistrationRequest:
+      description: Payload for creating a new user account.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UserRegistrationCreate"
+
+    ResendConfirmationRequest:
+      description: Payload for resending an email-confirmation message.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ResendConfirmation"
+
+    StatEventRequest:
+      description: Payload for recording a frontend analytics event.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/StatEvent"
+
+    EmailReplaceRequest:
+      description: Payload for replacing one real email address with another.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EmailReplace"
+
+    TwoFactorSmsRequest:
+      description: Payload for starting SMS-based 2FA setup.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TwoFactorSmsSetup"
+
+    TwoFactorGoogleRequest:
+      description: Payload for starting Google Authenticator 2FA setup.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TwoFactorGoogleSetup"
+
+    TwoFactorCodeRequest:
+      description: Payload for confirming a 2FA code.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TwoFactorCode"
+
+    SettingsUpdateRequest:
+      description: Payload for updating frontend settings.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SettingsUpdate"
+
+    UsedOnUpdateRequest:
+      description: Payload for updating saved website labels for a proxy binding.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UsedOnUpdate"
+
+    AskFormRequest:
+      description: Payload for the public ask-form widget.
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            properties:
+              name:
+                type: string
+              email:
+                type: string
+              message:
+                type: string
+            required:
+              - message
+
+  securitySchemes:
+    api_auth:
+      type: http
+      scheme: bearer
+    api_key:
+      type: apiKey
+      name: Token
+      in: header
