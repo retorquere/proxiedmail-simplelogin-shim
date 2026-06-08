@@ -757,13 +757,15 @@ function normalizeCustomDomains(body) {
 }
 
 function makeSuffixEntry(domain, isCustom, isPremium) {
-  if (!domain) {
+  const normalizedDomain = String(domain ?? "").trim().toLowerCase();
+
+  if (!normalizedDomain || normalizedDomain === "iam-rich.net") {
     return null;
   }
 
   return {
-    suffix: `@${domain}`,
-    signed_suffix: `@${domain}`,
+    suffix: `@${normalizedDomain}`,
+    signed_suffix: `@${normalizedDomain}`,
     is_custom: isCustom,
     is_premium: isPremium,
   };
@@ -1030,7 +1032,9 @@ function normalizeSignedSuffix(value) {
 
 function buildRandomPrefix(mode) {
   if (mode === "word") {
-    return `${pick(WORDS)}-${pick(WORDS)}-${shortId(4)}`;
+    const given = generateName('given') + (Math.random() < 0.5 ? '' : `.${generateName('given')}`)
+    const surname = generateName('surname') + (Math.random() < 0.5 ? '' : `-${generateName('surname')}`)
+    return `${given}.${surname}`.toLowerCase()
   }
 
   return crypto.randomUUID();
@@ -1159,3 +1163,36 @@ const WORDS = [
   "juniper",
   "kepler",
 ];
+
+
+function generateName(type, minLen = 5, maxLen = 9) {
+  const pool = NameModel.starts[type] ?? []
+  const map = NameModel.transitions[type] ?? {}
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const startBigram = pool[Math.floor(Math.random() * pool.length)]
+    if (!startBigram) continue
+    let bigram = startBigram
+    let result = bigram
+
+    let running = 50
+    while (running && result.length < maxLen) {
+      running--
+      const possibleNext = map[bigram]
+      if (!possibleNext) break
+
+      const nextChar = possibleNext[Math.floor(Math.random() * possibleNext.length)]
+
+      if (nextChar === null || nextChar === undefined) {
+        if (result.length >= minLen) break
+        continue
+      }
+
+      result += nextChar
+      bigram = result.slice(-2)
+    }
+
+    if (running) return result.charAt(0).toUpperCase() + result.slice(1)
+  }
+  throw new Error('failed to generate name')
+}
