@@ -163,10 +163,10 @@ async function handleAliasOptions(request, env, url) {
     aliasesResponse.json(),
   ]);
 
-  const suffixes = [
+  const suffixes = dedupeSuffixEntries([
     ...normalizeAvailableDomains(domainsBody),
     ...normalizeCustomDomains(customDomainsBody),
-  ];
+  ]);
 
   return json({
     can_create: (aliasesBody?.meta?.availableProxyBindings ?? 0) > 0,
@@ -343,14 +343,32 @@ async function handleCustomAliasCreate(request, env) {
     return json({ error: "alias_prefix and signed_suffix are required" }, 400);
   }
 
-  const realAddress = await getDefaultRealAddress(request, env);
-  if (!realAddress) {
-    return json({ error: "No verified mailbox available" }, 400);
+  const requestedMailboxIds = Array.isArray(payload?.mailbox_ids)
+    ? payload.mailbox_ids
+    : Object.prototype.hasOwnProperty.call(payload ?? {}, "mailbox_id")
+      ? [payload.mailbox_id]
+      : null;
+
+  const mailboxEmails = requestedMailboxIds
+    ? await resolveMailboxEmailsByIds(request, env, requestedMailboxIds)
+    : [];
+
+  if (requestedMailboxIds && mailboxEmails.length === 0) {
+    return json({ error: "mailbox_ids must be an array of id" }, 400);
+  }
+
+  if (!requestedMailboxIds) {
+    const realAddress = await getDefaultRealAddress(request, env);
+    if (!realAddress) {
+      return json({ error: "No verified mailbox available" }, 400);
+    }
+
+    mailboxEmails.push(realAddress);
   }
 
   const created = await createProxyBinding(request, env, {
     proxy_address: `${aliasPrefix}@${domain}`,
-    real_addresses: [realAddress],
+    real_addresses: mailboxEmails,
   });
 
   let alias = created.data;
@@ -762,6 +780,23 @@ function dedupeDomains(entries) {
   });
 }
 
+function dedupeSuffixEntries(entries) {
+  const bySuffix = new Map();
+
+  for (const entry of entries) {
+    if (!entry?.suffix) {
+      continue;
+    }
+
+    const existing = bySuffix.get(entry.suffix);
+    if (!existing || entry.is_custom) {
+      bySuffix.set(entry.suffix, entry);
+    }
+  }
+
+  return Array.from(bySuffix.values());
+}
+
 function toSimpleLoginAlias(binding) {
   const attributes = binding?.attributes ?? {};
   const realAddresses = normalizeRealAddresses(attributes.real_addresses);
@@ -774,6 +809,7 @@ function toSimpleLoginAlias(binding) {
 
   return {
     id: toSimpleLoginAliasId(binding?.id),
+    alias: attributes.proxy_address ?? "",
     email: attributes.proxy_address ?? "",
     name: null,
     enabled,
