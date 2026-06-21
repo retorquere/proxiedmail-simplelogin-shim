@@ -1040,7 +1040,7 @@ function normalizeSignedSuffix(value) {
   return normalized.replace(/^[.-]+/, '').trim()
 }
 
-function buildRandomPrefix(mode) {
+function buildRandomPrefix(mode = 'word') {
   if (mode === 'word') {
     const given = generateName('given') + (Math.random() < 0.5 ? '' : `.${generateName('given')}`)
     const surname = generateName('surname') + (Math.random() < 0.5 ? '' : `-${generateName('surname')}`)
