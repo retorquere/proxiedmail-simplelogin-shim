@@ -308,7 +308,10 @@ async function handleMailboxesList(request, env) {
 
 async function handleRandomAliasCreate(request, env, url) {
   const payload = await readJsonBody(request)
-  const domainOptions = await listCandidateDomains(request, env)
+  const [domainOptions, settings] = await Promise.all([
+    listCandidateDomains(request, env),
+    listProxiedmailSettings(request, env),
+  ])
   if (domainOptions.length === 0) {
     return json({ error: 'No domains available' }, 400)
   }
@@ -318,7 +321,11 @@ async function handleRandomAliasCreate(request, env, url) {
     return json({ error: 'No verified mailbox available' }, 400)
   }
 
-  const proxyAddress = `${buildRandomPrefix(url.searchParams.get('mode'))}@${domainOptions[0].domain}`
+  const defaultDomain = settings.get('random_alias_default_domain')
+  const selectedDomain = (defaultDomain && domainOptions.find(d => d.domain === defaultDomain))
+    ? defaultDomain
+    : domainOptions[0].domain
+  const proxyAddress = `${buildRandomPrefix(url.searchParams.get('mode'))}@${selectedDomain}`
   const created = await createProxyBinding(request, env, {
     proxy_address: proxyAddress,
     real_addresses: [realAddress],
