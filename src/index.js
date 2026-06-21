@@ -1,3 +1,5 @@
+import NameModel from './name_model.json'
+
 const EMPTY_RESPONSE = { error: null, data: [] }
 
 export default {
