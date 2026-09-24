@@ -1,12 +1,33 @@
+/**
+ * Cloudflare Worker shim that translates a subset of the SimpleLogin API into
+ * the ProxiedMail API surface expected by client applications.
+ *
+ * The worker accepts SimpleLogin-style routes such as /api/auth/login,
+ * /api/v2/aliases, and /api/setting, then forwards the work to the upstream
+ * ProxiedMail service while re-shaping the response payloads to match the
+ * SimpleLogin format the client already knows.
+ */
 import NameModel from './name_model.json'
 
+/**
+ * Standard empty envelope used for unhandled or unsupported routes.
+ */
 const EMPTY_RESPONSE = { error: null, data: [] }
 
+/**
+ * Worker entry point exported to Cloudflare.
+ * It finds the matching route, executes it, and converts thrown errors into
+ * JSON responses so the shim behaves like a stable SimpleLogin-compatible API.
+ */
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
     const route = matchRoute(request.method, url.pathname)
 
+    // A request is accepted only if the verb + pathname matches one of the shim's
+    // explicit handler routes. Any other path is deliberately treated as an empty
+    // success envelope instead of passing through to the upstream API, because the
+    // client expects a stable SimpleLogin-compatible surface even for unknown routes.
     if (!route) {
       return json(EMPTY_RESPONSE, 200)
     }
@@ -15,6 +36,10 @@ export default {
       return await route.handler(request, env, url, route.params)
     }
     catch (error) {
+      // Preserve HTTP status information from upstream errors when we already have a
+      // typed HttpError; otherwise collapse everything into a generic 500. This is
+      // the decision point that keeps the shim usable for a client that expects JSON
+      // errors instead of a raw exception.
       if (error instanceof HttpError) {
         return json(error.body, error.status)
       }
@@ -29,6 +54,11 @@ export default {
   },
 }
 
+/**
+ * Ordered list of API routes that this shim intentionally supports.
+ * Each route maps an HTTP verb and path regex to a handler that implements the
+ * SimpleLogin-compatible behavior for that endpoint.
+ */
 const routes = [
   { method: 'GET', pattern: /^\/$/, handler: handleRoot },
   { method: 'POST', pattern: /^\/api\/auth\/login$/, handler: handleAuthLogin },
@@ -51,7 +81,18 @@ const routes = [
   { method: 'DELETE', pattern: /^\/api\/aliases\/([^/]+)$/, handler: handleAliasDelete },
 ]
 
+/**
+ * Matches an incoming request against the supported route table.
+ *
+ * @param {string} method - HTTP verb from the incoming request.
+ * @param {string} pathname - URL pathname to match against known routes.
+ * @returns {{ method: string, pattern: RegExp, handler: Function, params: string[] } | null}
+ */
 function matchRoute(method, pathname) {
+  // The actual decision is "do we support this verb+path pair?" If the method does
+  // not match, we skip the route immediately. If the regex matches, we capture the
+  // path parameters and hand execution to the corresponding compatibility handler;
+  // otherwise no route is returned and the worker returns an empty envelope.
   for (const route of routes) {
     if (route.method !== method) {
       continue
@@ -59,6 +100,7 @@ function matchRoute(method, pathname) {
 
     const match = pathname.match(route.pattern)
     if (match) {
+      console.log(`Matched route: ${method} ${route.pattern}`)
       return { ...route, params: match.slice(1) }
     }
   }
@@ -66,7 +108,18 @@ function matchRoute(method, pathname) {
   return null
 }
 
+/**
+ * Returns the authenticated user profile in the SimpleLogin shape expected by the
+ * client app. This is a lightweight compatibility projection over
+ * ProxiedMail's /api/v1/users/me payload.
+ */
 async function handleRoot(request, env) {
+  // This is the SimpleLogin /api/user_info and / root profile read. The client
+  // expects a flat object, but ProxiedMail gives a nested response under
+  // body.data.attributes and body.meta.plan. We copy only the fields the client
+  // actually reads: username -> name, email -> email, plan.isPaid -> is_premium,
+  // maxFreeProxyBindings -> max_alias_free_plan, and then fill the rest with
+  // SimpleLogin-compatible defaults like in_trial: false and profile_picture_url: null.
   const profile = await proxiedmailFetchOrThrow(request, env, '/api/v1/users/me?updateFrontCache=0', {
     authMode: 'token',
   })
@@ -86,7 +139,19 @@ async function handleRoot(request, env) {
   })
 }
 
+/**
+ * Implements the SimpleLogin login endpoint by exchanging the caller's email and
+ * password against ProxiedMail's auth service, then fetching the user profile and
+ * an API token to return a SimpleLogin-style payload.
+ */
 async function handleAuthLogin(request, env) {
+  // SimpleLogin clients send { email, password } in the request body, while
+  // ProxiedMail expects a nested auth request under data.attributes.username and
+  // data.attributes.password. We unwrap the SimpleLogin payload, call ProxiedMail's
+  // /api/v1/auth, then immediately request both a new API token and the current
+  // user profile. The final response is flattened back into the SimpleLogin shape:
+  // username/email are taken from the profile and api_key is the token returned by
+  // the ProxiedMail API token endpoint.
   const payload = await readJsonBody(request)
   const email = String(payload?.email ?? '').trim()
   const password = String(payload?.password ?? '')
@@ -153,7 +218,19 @@ async function handleAuthLogin(request, env) {
   })
 }
 
+/**
+ * Lists alias-generation options and supported domains in the SimpleLogin
+ * structure. It merges ProxiedMail's available domains and custom domains into
+ * a single deduplicated suffix list.
+ */
 async function handleAliasOptions(request, env, url) {
+  // This endpoint answers the alias creation UI with the list of suffixes and
+  // whether the account can create more aliases. The frontend is expecting a
+  // SimpleLogin payload shaped like { can_create, suffixes, prefix_suggestion },
+  // but ProxiedMail exposes available domains and custom domains in separate
+  // endpoints. We pull both together, normalize each domain into @example.com
+  // entries, deduplicate custom-vs-default conflicts, and then expose the result as
+  // the SL suffix list that the UI expects.
   const [domainsResponse, customDomainsResponse, aliasesResponse] = await Promise.all([
     proxiedmailFetchOrThrow(request, env, '/gapi/available-domains', { authMode: 'bearer' }),
     proxiedmailFetchOrThrow(request, env, '/gapi/custom-domains?ignoreProcessing=1', { authMode: 'bearer' }),
@@ -179,7 +256,16 @@ async function handleAliasOptions(request, env, url) {
   })
 }
 
+/**
+ * Lists the domains allowed for alias configuration, normalized to the shape
+ * SimpleLogin expects for the /api/v2/setting/domains endpoint.
+ */
 async function handleSettingDomainsList(request, env) {
+  // The SimpleLogin UI asks for a flat domain list under /api/v2/setting/domains,
+  // but ProxiedMail stores the same data in two different endpoints: built-ins and
+  // custom domains. This function fetches both sets, strips the leading @ from the
+  // normalized suffix values, and converts the result to { domain, is_custom }
+  // entries. Those are then de-duped so the client sees a single clean list.
   const [domainsResponse, customDomainsResponse] = await Promise.all([
     proxiedmailFetchOrThrow(request, env, '/gapi/available-domains', { authMode: 'bearer' }),
     proxiedmailFetchOrThrow(request, env, '/gapi/custom-domains?ignoreProcessing=1', { authMode: 'bearer' }),
@@ -197,7 +283,15 @@ async function handleSettingDomainsList(request, env) {
   return json(domains)
 }
 
+/**
+ * Reads a bundle of account settings from ProxiedMail and reshapes it into the
+ * SimpleLogin setting payload used by clients.
+ */
 async function handleSetting(request, env) {
+  // SimpleLogin reads a compact settings object. ProxiedMail stores settings as a
+  // list of { key, value } records under /gapi/settings and separately exposes the
+  // available domains. We re-map the underlying values into the names the client
+  // expects: random_alias_default_domain, sender_format, and random_alias_suffix.
   const settings = await listProxiedmailSettings(request, env)
   const domains = await handleSettingDomainsData(request, env)
 
@@ -210,7 +304,15 @@ async function handleSetting(request, env) {
   })
 }
 
+/**
+ * Updates a subset of user settings on ProxiedMail and returns the refreshed
+ * settings payload in SimpleLogin format.
+ */
 async function handleSettingUpdate(request, env) {
+  // Decision point: which SimpleLogin settings are even supported by this shim?
+  // Only the three keys the UI writes are mapped; everything else is ignored. That
+  // keeps the patch payload minimal and avoids accidentally mutating upstream values
+  // the shim does not understand.
   const payload = await readJsonBody(request)
   const nextSettings = []
 
@@ -236,6 +338,8 @@ async function handleSettingUpdate(request, env) {
     })
   }
 
+  // If the client sent no supported fields, we intentionally make no upstream call and
+  // just return the current settings for the current account.
   if (nextSettings.length > 0) {
     const response = await proxiedmailFetch(request, env, '/gapi/settings/update', {
       authMode: 'bearer',
@@ -254,7 +358,15 @@ async function handleSettingUpdate(request, env) {
   return handleSetting(request, env)
 }
 
+/**
+ * Lists aliases with a SimpleLogin response envelope, supporting pagination,
+ * filtering, and sorting based on the request query parameters.
+ */
 async function handleAliasesList(request, env, url) {
+  // This is the page/filter decision point: without page_id the client cannot page
+  // legitimately, so we reject early. Once page_id exists, the list is mapped to the
+  // SimpleLogin alias schema, filtered by enabled/disabled/pinned, then sliced to a
+  // fixed page size of 20 before returning the final { aliases } envelope.
   if (!url.searchParams.has('page_id')) {
     return json({ error: 'page_id must be provided in request query' }, 400)
   }
@@ -274,7 +386,17 @@ async function handleAliasesList(request, env, url) {
   return json({ aliases })
 }
 
+/**
+ * Lists mailbox records in SimpleLogin format by combining verified addresses,
+ * real addresses, and the alias counts associated with each mailbox.
+ */
 async function handleMailboxesList(request, env) {
+  // Mailboxes are the SimpleLogin equivalent of real addresses. ProxiedMail keeps
+  // them in two separate sources: /gapi/real-emails and /gapi/verified-emails-list.
+  // We merge both lists, de-dupe them, and then enrich each mailbox with metadata
+  // the client expects: default status, alias count by real address, and whether the
+  // address is verified. The final shape becomes { mailboxes: [{ id, email, default,
+  // nb_alias, verified }] }.
   const [realEmailsResponse, verifiedResponse, bindingsResponse] = await Promise.all([
     proxiedmailFetchOrThrow(request, env, '/gapi/real-emails', { authMode: 'bearer' }),
     proxiedmailFetchOrThrow(request, env, '/gapi/verified-emails-list', { authMode: 'bearer' }),
@@ -306,8 +428,18 @@ async function handleMailboxesList(request, env) {
   return json({ mailboxes })
 }
 
+/**
+ * Creates a new random alias by choosing a domain, ensuring a verified mailbox
+ * exists, and pushing the binding through the ProxiedMail proxy-binding API.
+ */
 async function handleRandomAliasCreate(request, env, url) {
+  // The creation flow has three important gates: (1) do we have any candidate
+  // domains?, (2) do we have a usable default mailbox?, and (3) if the user's
+  // default domain is invalid, fall back to the first available domain. Only after
+  // those checks pass do we create the ProxiedMail binding and attach the optional
+  // note as a description.
   const payload = await readJsonBody(request)
+  console.log('Payload received for random alias creation:', payload)
   const [domainOptions, settings] = await Promise.all([
     listCandidateDomains(request, env),
     listProxiedmailSettings(request, env),
@@ -343,14 +475,22 @@ async function handleRandomAliasCreate(request, env, url) {
   return json(toSimpleLoginAlias(alias), 201)
 }
 
+/**
+ * Creates a custom alias with a user-defined prefix and a signed suffix, then
+ * assigns it to the selected mailbox IDs or the default mailbox when omitted.
+ */
 async function handleCustomAliasCreate(request, env) {
+  // Custom creation is stricter than random creation: we require a signed suffix,
+  // then validate mailbox selection. If the client gave mailbox_ids we resolve them
+  // to real emails; if it omitted them we fall back to the default mailbox; if that
+  // mailbox is missing we reject the request instead of creating a broken alias.
   const payload = await readJsonBody(request)
   const signedSuffix = String(payload?.signed_suffix ?? '').trim()
-  const aliasPrefix = sanitizeAliasPrefix(payload?.alias_prefix)
+  const aliasPrefix = sanitizeAliasPrefix(payload?.alias_prefix) || buildRandomPrefix('word')
   const domain = normalizeSignedSuffix(signedSuffix)
 
-  if (!aliasPrefix || !domain) {
-    return json({ error: 'alias_prefix and signed_suffix are required' }, 400)
+  if (!domain) {
+    return json({ error: 'signed_suffix is required' }, 400)
   }
 
   const requestedMailboxIds = Array.isArray(payload?.mailbox_ids)
@@ -393,7 +533,15 @@ async function handleCustomAliasCreate(request, env) {
   return json(toSimpleLoginAlias(alias), 201)
 }
 
+/**
+ * Flips the enabled state of an alias by toggling every real address associated
+ * with the ProxiedMail binding.
+ */
 async function handleAliasToggle(request, env, _url, params) {
+  // The SimpleLogin toggle endpoint is a boolean flip over an alias, but ProxiedMail
+  // stores enabled state on each real email entry inside real_addresses. We resolve
+  // the binding, invert the state for every mailbox, and then send an object keyed by
+  // email address back to ProxiedMail as the new real_addresses payload.
   const aliasId = params[0]
   const binding = await getProxyBindingById(request, env, aliasId)
   const realAddresses = normalizeRealAddresses(binding.attributes?.real_addresses)
@@ -410,6 +558,9 @@ async function handleAliasToggle(request, env, _url, params) {
   return json({ enabled: nextEnabled })
 }
 
+/**
+ * Deletes an alias by removing the matching ProxiedMail proxy binding.
+ */
 async function handleAliasDelete(request, env, _url, params) {
   const aliasId = params[0]
   const binding = await getProxyBindingById(request, env, aliasId)
@@ -425,7 +576,16 @@ async function handleAliasDelete(request, env, _url, params) {
   return json({ deleted: true })
 }
 
+/**
+ * Updates the metadata and mailbox assignments for an alias while keeping the
+ * result in the SimpleLogin alias schema.
+ */
 async function handleAliasUpdate(request, env, _url, params) {
+  // SimpleLogin updates can modify note text and mailbox assignments in one payload.
+  // We map note -> description and mailbox_ids -> real_addresses by resolving each
+  // SimpleLogin mailbox id back to its email and then constructing the upstream
+  // object keyed by email. After patching, we immediately convert the updated
+  // ProxiedMail binding back into the SimpleLogin alias schema.
   const aliasId = params[0]
   const binding = await getProxyBindingById(request, env, aliasId)
   const payload = await readJsonBody(request)
@@ -463,7 +623,15 @@ async function handleAliasUpdate(request, env, _url, params) {
   return json(toSimpleLoginAlias(updated.data))
 }
 
+/**
+ * Fetches alias activity entries for a given alias and paginates them into the
+ * SimpleLogin activities payload format.
+ */
 async function handleAliasActivities(request, env, url, params) {
+  // SimpleLogin activity logs are a paginated list under { activities }, while
+  // ProxiedMail exposes them as received email links for a proxy binding id. We
+  // fetch that upstream activity stream, convert each event via toSimpleLoginActivity(),
+  // and then page the translated result to match the client's expectations.
   const aliasId = params[0]
   const binding = await getProxyBindingById(request, env, aliasId)
 
@@ -498,7 +666,15 @@ async function handleAliasActivities(request, env, url, params) {
   return json({ activities })
 }
 
+/**
+ * Lists contacts attached to a given alias and converts them into the SimpleLogin
+ * contact schema, supporting pagination.
+ */
 async function handleAliasContactsList(request, env, url, params) {
+  // Contacts are stored on the proxy binding as a nested contacts collection, but
+  // the client expects { contacts: [...] } with individual entries in SimpleLogin
+  // format. We fetch the upstream collection, convert each document through
+  // toSimpleLoginContact(), and page the translated list before returning it.
   const aliasId = params[0]
   const binding = await getProxyBindingById(request, env, aliasId)
   const pageId = Math.max(Number.parseInt(url.searchParams.get('page_id') ?? '0', 10) || 0, 0)
@@ -519,7 +695,17 @@ async function handleAliasContactsList(request, env, url, params) {
   return json({ contacts })
 }
 
+/**
+ * Creates a new contact on an alias, deduplicating contacts that already exist and
+ * returning a SimpleLogin-like result payload.
+ */
 async function handleAliasContactCreate(request, env, _url, params) {
+  // SimpleLogin contacts are created by sending a single recipient email, but the
+  // upstream ProxiedMail API nests the contact under a relationship to a proxy
+  // binding. We first check for an existing contact with the same normalized email,
+  // and if none exists we POST a /api/v1/contacts record linking it to the binding.
+  // The result is then converted back to the SimpleLogin contact schema with the
+  // extra existed flag indicating whether duplicate suppression occurred.
   const aliasId = params[0]
   const binding = await getProxyBindingById(request, env, aliasId)
   const payload = await readJsonBody(request)
@@ -576,7 +762,15 @@ async function handleAliasContactCreate(request, env, _url, params) {
   return json({ ...toSimpleLoginContact(body?.data), existed: false }, 201)
 }
 
+/**
+ * Resolves a ProxiedMail proxy-binding record by its SimpleLogin-style alias ID,
+ * accepting either the raw upstream ID or the derived SimpleLogin hash value.
+ */
 async function getProxyBindingById(request, env, id) {
+  // The real compatibility problem is that the client and upstream are using two
+  // different identifiers for the same alias: the UI sends a SimpleLogin-style hash,
+  // while ProxiedMail exposes the canonical UUID. The resolution logic therefore
+  // accepts either raw UUID or derived hash and throws only when neither matches.
   const response = await proxiedmailFetchOrThrow(request, env, `/api/v1/proxy-bindings?sort=desc`, {
     authMode: 'token',
   })
@@ -596,7 +790,15 @@ async function getProxyBindingById(request, env, id) {
   return found
 }
 
+/**
+ * Creates a new ProxiedMail proxy binding from a SimpleLogin-compatible payload.
+ */
 async function createProxyBinding(request, env, attributes) {
+  // This is the upstream creation call for a new alias. The shim already has the
+  // SimpleLogin-formatted alias data in memory, but ProxiedMail wants the binding
+  // wrapped in { data: { type: 'proxy_bindings', attributes } }, with proxy_address
+  // and real_addresses as the core fields. The response is returned raw so the
+  // caller can then convert it back to the SimpleLogin object shape.
   const response = await proxiedmailFetch(request, env, '/api/v1/proxy-bindings', {
     authMode: 'token',
     method: 'POST',
@@ -618,7 +820,15 @@ async function createProxyBinding(request, env, attributes) {
   return response.json()
 }
 
+/**
+ * Patches an existing ProxiedMail proxy binding to update note text, mailbox
+ * assignments, or enabled state while preserving the required proxy_address.
+ */
 async function patchProxyBinding(request, env, id, proxyAddress, attributes) {
+  // Every alias update is eventually a PATCH against a specific proxy binding.
+  // SimpleLogin fields like note, real_addresses, and enabled state must be serialized
+  // into ProxiedMail's attribute object, while the required proxy_address field is
+  // kept in place so the binding stays coherent even when only some properties changed.
   const response = await proxiedmailFetch(request, env, `/api/v1/proxy-bindings/${encodeURIComponent(id)}`, {
     authMode: 'token',
     method: 'PATCH',
@@ -644,7 +854,15 @@ async function patchProxyBinding(request, env, id, proxyAddress, attributes) {
   return response.json()
 }
 
+/**
+ * Collects candidate domains from both ProxiedMail's platform domains and any
+ * custom domains, deduplicating them for creation flows.
+ */
 async function listCandidateDomains(request, env) {
+  // The alias UI can only create aliases on domains it considers valid. This helper
+  // merges ProxiedMail's built-in domains and custom domains into a single set of
+  // candidate domains, stripping the @ prefix and keeping the custom flag so the
+  // random alias creator can prefer the configured default domain without duplicates.
   const [domainsResponse, customDomainsResponse] = await Promise.all([
     proxiedmailFetchOrThrow(request, env, '/gapi/available-domains', { authMode: 'bearer' }),
     proxiedmailFetchOrThrow(request, env, '/gapi/custom-domains?ignoreProcessing=1', { authMode: 'bearer' }),
@@ -662,7 +880,16 @@ async function listCandidateDomains(request, env) {
   return dedupeDomains(domains)
 }
 
+/**
+ * Chooses the default real address for alias creation, preferring a verified and
+ * default mailbox when one exists.
+ */
 async function getDefaultRealAddress(request, env) {
+  // Alias creation requires a mailbox to use as the forwarding target. ProxiedMail
+  // exposes the preferred default via real_emails[].is_default and verified status,
+  // but the client also accepts a bare verified email if no default is set. We rank
+  // those candidates in priority order so alias creation is stable and uses the most
+  // suitable mailbox automatically.
   const [verifiedResponse, realEmailsResponse] = await Promise.all([
     proxiedmailFetchOrThrow(request, env, '/gapi/verified-emails-list', { authMode: 'bearer' }),
     proxiedmailFetchOrThrow(request, env, '/gapi/real-emails', { authMode: 'bearer' }),
@@ -679,7 +906,16 @@ async function getDefaultRealAddress(request, env) {
   return defaultEntry?.email ?? verified[0] ?? realEmails.find(entry => entry?.is_verified)?.email ?? null
 }
 
+/**
+ * Lists all real/verified email addresses and normalizes them into the mailbox
+ * identities used by the SimpleLogin client contract.
+ */
 async function listRealEmails(request, env) {
+  // The SimpleLogin mailbox ID is effectively a normalized version of the email
+  // address. We gather ProxiedMail's real emails and the verified-email list,
+  // dedupe them, and then return objects that look like { id, email, verified,
+  // default }. This is what the client uses when resolving mailbox_ids back to
+  // actual addresses or displaying the mailbox list.
   const [realEmailsResponse, verifiedResponse] = await Promise.all([
     proxiedmailFetchOrThrow(request, env, '/gapi/real-emails', { authMode: 'bearer' }),
     proxiedmailFetchOrThrow(request, env, '/gapi/verified-emails-list', { authMode: 'bearer' }),
@@ -703,7 +939,14 @@ async function listRealEmails(request, env) {
   }))
 }
 
+/**
+ * Reads the raw user settings object from ProxiedMail and converts it into a Map
+ * keyed by setting name for easier lookups.
+ */
 async function listProxiedmailSettings(request, env) {
+  // ProxiedMail stores settings as an array of { key, value } entries. We convert
+  // that structure into a Map so the rest of the shim can look up values by name in
+  // O(1) time when preparing the SimpleLogin setting response or writing updates.
   const response = await proxiedmailFetchOrThrow(request, env, '/gapi/settings', { authMode: 'bearer' })
   const body = await response.json()
   const entries = Array.isArray(body) ? body : []
@@ -715,7 +958,14 @@ async function listProxiedmailSettings(request, env) {
   )
 }
 
+/**
+ * Retrieves the normalized list of configured domains used when building the
+ * /api/setting payload.
+ */
 async function handleSettingDomainsData(request, env) {
+  // This is the internal helper used by handleSetting(): it fetches the canonical
+  // domain list for the account and returns the same deduplicated domain data in the
+  // format that the settings endpoint expects as "default domain" candidates.
   const [domainsResponse, customDomainsResponse] = await Promise.all([
     proxiedmailFetchOrThrow(request, env, '/gapi/available-domains', { authMode: 'bearer' }),
     proxiedmailFetchOrThrow(request, env, '/gapi/custom-domains?ignoreProcessing=1', { authMode: 'bearer' }),
@@ -731,7 +981,14 @@ async function handleSettingDomainsData(request, env) {
   ])
 }
 
+/**
+ * Converts mailbox IDs from the SimpleLogin client into the underlying email
+ * addresses used by ProxiedMail.
+ */
 async function resolveMailboxEmailsByIds(request, env, mailboxIds) {
+  // The SimpleLogin client sends mailbox ids, but ProxiedMail's create/update calls
+  // need actual email addresses. We resolve the ids against the normalized mailbox
+  // list and map only the selected entries back to their email strings.
   const requestedIds = new Set(mailboxIds.map(value => String(value)))
   const mailboxes = await listRealEmails(request, env)
 
@@ -740,6 +997,10 @@ async function resolveMailboxEmailsByIds(request, env, mailboxIds) {
     .map(mailbox => mailbox.email)
 }
 
+/**
+ * Normalizes the upstream domain list into a uniform suffix structure that the
+ * rest of the shim can consume.
+ */
 function normalizeAvailableDomains(body) {
   if (!Array.isArray(body)) {
     return []
@@ -756,6 +1017,10 @@ function normalizeAvailableDomains(body) {
     .filter(Boolean)
 }
 
+/**
+ * Normalizes custom-domain payloads in the same suffix format as built-in
+ * ProxiedMail domains.
+ */
 function normalizeCustomDomains(body) {
   if (!Array.isArray(body)) {
     return []
@@ -766,6 +1031,10 @@ function normalizeCustomDomains(body) {
     .filter(Boolean)
 }
 
+/**
+ * Builds a normalized suffix object containing the domain, signed suffix, and
+ * premium/custom metadata.
+ */
 function makeSuffixEntry(domain, isCustom, isPremium) {
   const normalizedDomain = String(domain ?? '').trim().toLowerCase()
 
@@ -781,6 +1050,10 @@ function makeSuffixEntry(domain, isCustom, isPremium) {
   }
 }
 
+/**
+ * Deduplicates candidate domains while keeping the custom-domain version when both
+ * versions exist for the same domain.
+ */
 function dedupeDomains(entries) {
   const seen = new Set()
   return entries.filter(entry => {
@@ -792,6 +1065,10 @@ function dedupeDomains(entries) {
   })
 }
 
+/**
+ * Deduplicates suffix entries by domain suffix, preferring custom domains over
+ * built-in ones when both are present.
+ */
 function dedupeSuffixEntries(entries) {
   const bySuffix = new Map()
 
@@ -809,6 +1086,10 @@ function dedupeSuffixEntries(entries) {
   return Array.from(bySuffix.values())
 }
 
+/**
+ * Converts a ProxiedMail proxy-binding object into the SimpleLogin alias schema
+ * used by the client application.
+ */
 function toSimpleLoginAlias(binding) {
   const attributes = binding?.attributes ?? {}
   const realAddresses = normalizeRealAddresses(attributes.real_addresses)
@@ -840,6 +1121,9 @@ function toSimpleLoginAlias(binding) {
   }
 }
 
+/**
+ * Maps a ProxiedMail contact object into the SimpleLogin contact structure.
+ */
 function toSimpleLoginContact(entry) {
   const attributes = entry?.attributes ?? {}
   const contact = attributes.recipient_email
@@ -861,6 +1145,9 @@ function toSimpleLoginContact(entry) {
   }
 }
 
+/**
+ * Maps upstream activity entries into the SimpleLogin activity format.
+ */
 function toSimpleLoginActivity(entry, aliasAddress) {
   const attributes = entry?.attributes ?? {}
   const sender = attributes.sender_email
@@ -879,6 +1166,9 @@ function toSimpleLoginActivity(entry, aliasAddress) {
   }
 }
 
+/**
+ * Produces a deterministic SimpleLogin-style ID for addresses and object IDs.
+ */
 function toSimpleLoginMailboxId(email, fallbackIndex) {
   if (!email) {
     return fallbackIndex + 1
@@ -887,10 +1177,17 @@ function toSimpleLoginMailboxId(email, fallbackIndex) {
   return toSimpleLoginAliasId(email)
 }
 
+/**
+ * Normalizes contact addresses for case-insensitive comparisons.
+ */
 function normalizeContactAddress(value) {
   return String(value ?? '').trim().toLowerCase()
 }
 
+/**
+ * Formats reverse aliases in a human-readable form while keeping the actual
+ * reverse alias address available separately.
+ */
 function formatReverseAlias(contact, reverseProxyAddress) {
   if (!reverseProxyAddress) {
     return contact
@@ -901,7 +1198,15 @@ function formatReverseAlias(contact, reverseProxyAddress) {
   return `${displayName} <${reverseProxyAddress}>`
 }
 
+/**
+ * Accepts either an array or a map of real-address definitions and normalizes them
+ * to a common { email, is_enabled } structure.
+ */
 function normalizeRealAddresses(value) {
+  // Real-address state is represented in two incompatible shapes upstream: an array
+  // of entries or a keyed object. The decision here is to normalize both into the
+  // same [{ email, is_enabled }] form so all later code can do one consistent check:
+  // "is this mailbox enabled or disabled?"
   if (Array.isArray(value)) {
     return value
       .map(entry => {
@@ -933,6 +1238,9 @@ function normalizeRealAddresses(value) {
   return []
 }
 
+/**
+ * De-dupes mailbox addresses while preserving the order of first appearance.
+ */
 function dedupeMailboxEmails(values) {
   const seen = new Set()
   const result = []
@@ -950,6 +1258,10 @@ function dedupeMailboxEmails(values) {
   return result
 }
 
+/**
+ * Counts how many aliases each real address currently owns so mailbox metadata can
+ * report a total alias count to the client.
+ */
 function countAliasesByRealAddress(bindings) {
   const counts = new Map()
 
@@ -962,6 +1274,10 @@ function countAliasesByRealAddress(bindings) {
   return counts
 }
 
+/**
+ * Keeps the first domain for each base domain while preferring custom domains when
+ * both custom and default variants are available.
+ */
 function dedupeSettingDomains(entries) {
   const byDomain = new Map()
 
@@ -979,6 +1295,24 @@ function dedupeSettingDomains(entries) {
   return Array.from(byDomain.values())
 }
 
+/**
+ * SimpleLogin exposes a user preference named random_alias_suffix. In the client,
+ * this value is a mode selector, not a literal suffix text. The only modes this shim
+ * actually understands are:
+ *   - 'word' -> use a name-based alias prefix, e.g. "jane.doe"
+ *   - 'random_string' -> keep the value as-is because the client explicitly sends it
+ *     and the rest of the shim treats it as another supported mode.
+ *
+ * The decision is intentionally narrow: the shim does not attempt to support every
+ * possible downstream suffix style. If the incoming value is anything else, we fall
+ * back to 'word' instead of passing an unsupported value through to the upstream API.
+ *
+ * This is the exact whitelist enforced by the code below:
+ *   normalized === 'random_string' || normalized === 'word'
+ *
+ * Anything else becomes 'word', so the settings endpoint always returns one of the two
+ * modes the UI can actually render and the alias creation code understands.
+ */
 function normalizeRandomAliasSuffix(value) {
   const normalized = String(value ?? 'word').trim()
   if (normalized === 'random_string' || normalized === 'word') {
@@ -988,6 +1322,9 @@ function normalizeRandomAliasSuffix(value) {
   return 'word'
 }
 
+/**
+ * Creates a stable numeric ID from an upstream identifier by hashing the string.
+ */
 function toSimpleLoginAliasId(value) {
   const input = String(value ?? '')
   let hash = 2166136261
@@ -1000,6 +1337,9 @@ function toSimpleLoginAliasId(value) {
   return (hash >>> 0) & 0x7fffffff
 }
 
+/**
+ * Applies the enabled/disabled filter requested by the SimpleLogin client.
+ */
 function matchesAliasFilter(alias, searchParams) {
   if (searchParams.has('enabled')) {
     return alias.enabled
@@ -1016,6 +1356,9 @@ function matchesAliasFilter(alias, searchParams) {
   return true
 }
 
+/**
+ * Generates a SimpleLogin-style alias prefix suggestion from the incoming host.
+ */
 function hostnameSuggestion(hostname) {
   if (!hostname) {
     return ''
@@ -1025,6 +1368,9 @@ function hostnameSuggestion(hostname) {
   return sanitizeAliasPrefix(candidate)
 }
 
+/**
+ * Cleans alias prefixes so they remain valid for use in local-part generation.
+ */
 function sanitizeAliasPrefix(value) {
   const cleaned = String(value ?? '')
     .toLowerCase()
@@ -1035,11 +1381,18 @@ function sanitizeAliasPrefix(value) {
   return cleaned
 }
 
+/**
+ * Strips a leading @ from a signed suffix and cleans any leading punctuation.
+ */
 function normalizeSignedSuffix(value) {
   const normalized = value.startsWith('@') ? value.slice(1) : value
   return normalized.replace(/^[.-]+/, '').trim()
 }
 
+/**
+ * Generates a random alias prefix using the same word-based heuristics expected by
+ * the SimpleLogin client, falling back to a UUID for non-word modes.
+ */
 function buildRandomPrefix(mode = 'word') {
   if (mode === 'word') {
     const given = generateName('given') + (Math.random() < 0.5 ? '' : `.${generateName('given')}`)
@@ -1050,19 +1403,32 @@ function buildRandomPrefix(mode = 'word') {
   return crypto.randomUUID()
 }
 
+/**
+ * Picks one random value from an array.
+ */
 function pick(values) {
   return values[Math.floor(Math.random() * values.length)]
 }
 
+/**
+ * Creates a short string identifier from a UUID.
+ */
 function shortId(length) {
   return crypto.randomUUID().replace(/-/g, '').slice(0, length)
 }
 
+/**
+ * Converts an ISO-like timestamp into seconds since epoch, returning null when the
+ * value cannot be parsed.
+ */
 function toUnixTimestamp(value) {
   const timestamp = Date.parse(value ?? '')
   return Number.isNaN(timestamp) ? null : Math.floor(timestamp / 1000)
 }
 
+/**
+ * Forwards only the query keys explicitly allowed by the shim for compatibility.
+ */
 function forwardQuery(searchParams, allowedKeys) {
   const forwarded = new URLSearchParams()
   for (const key of allowedKeys) {
@@ -1074,6 +1440,10 @@ function forwardQuery(searchParams, allowedKeys) {
   return query ? `?${query}` : ''
 }
 
+/**
+ * Safely reads and parses a JSON request body, converting malformed payloads into
+ * a descriptive error.
+ */
 async function readJsonBody(request) {
   const contentLength = request.headers.get('content-length')
   if (contentLength === '0') {
@@ -1093,6 +1463,10 @@ async function readJsonBody(request) {
   }
 }
 
+/**
+ * Performs a proxied fetch to the upstream ProxiedMail service while preserving
+ * the incoming Authorization header in a compatibility-friendly way.
+ */
 async function proxiedmailFetch(request, env, path, options = {}) {
   const baseUrl = String(env.PROXIEDMAIL_BASE_URL || 'https://proxiedmail.com').replace(/\/$/, '')
   const targetUrl = `${baseUrl}${path}`
@@ -1119,6 +1493,10 @@ async function proxiedmailFetch(request, env, path, options = {}) {
   return response
 }
 
+/**
+ * Fetches the upstream API and throws an HttpError when the response is not OK,
+ * allowing the higher-level route handlers to return the right API status.
+ */
 async function proxiedmailFetchOrThrow(request, env, path, options = {}) {
   const response = await proxiedmailFetch(request, env, path, options)
   if (!response.ok) {
@@ -1128,16 +1506,28 @@ async function proxiedmailFetchOrThrow(request, env, path, options = {}) {
   return response
 }
 
+/**
+ * Converts an upstream error response into the JSON payload that should be returned
+ * to the SimpleLogin client.
+ */
 async function relayError(response) {
   return json(await safeJson(response), response.status)
 }
 
+/**
+ * Builds a typed HttpError from an upstream response so route handlers can catch
+ * and preserve the exact HTTP status and body.
+ */
 async function errorFromResponse(response) {
   const body = await safeJson(response)
   const message = body?.error || body?.message || `Request failed with status ${response.status}`
   return new HttpError(response.status, typeof body === 'object' && body !== null ? body : { error: message })
 }
 
+/**
+ * Safely reads JSON from a response, falling back to a generic error payload when
+ * parsing fails.
+ */
 async function safeJson(response) {
   try {
     return await response.json()
@@ -1147,6 +1537,9 @@ async function safeJson(response) {
   }
 }
 
+/**
+ * Returns a JSON Response with the given body and status code.
+ */
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -1156,6 +1549,10 @@ function json(body, status = 200) {
   })
 }
 
+/**
+ * Error type used by the shim to carry a specific HTTP status and body across
+ * route handlers.
+ */
 class HttpError extends Error {
   constructor(status, body) {
     super(body?.error || body?.message || `Request failed with status ${status}`)
@@ -1164,6 +1561,10 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * Generates human-readable random names using a model that encodes letter
+ * transitions and starting bigrams.
+ */
 function generateName(type, minLen = 5, maxLen = 9) {
   const pool = NameModel.starts[type] ?? []
   const map = NameModel.transitions[type] ?? {}
