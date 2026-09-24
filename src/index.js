@@ -301,17 +301,31 @@ async function handleCustomDomainsList(request, env) {
     bindingsResponse.json(),
   ])
 
-  const aliasCounts = countAliasesByDomain(Array.isArray(bindingsBody?.data) ? bindingsBody.data : [])
   const customDomains = Array.isArray(customDomainsBody)
     ? customDomainsBody.map(entry => {
       const domainName = String(entry?.domain_name ?? entry?.domain ?? '').trim().toLowerCase()
+      const domainBindings = (Array.isArray(bindingsBody?.data) ? bindingsBody.data : [])
+        .filter(binding => getBindingDomain(binding) === domainName)
+      const mailboxes = dedupeMailboxEmails(domainBindings.flatMap(binding => (
+        normalizeRealAddresses(binding?.attributes?.real_addresses).map(address => address.email)
+      ))).map((email, index) => ({
+        id: toSimpleLoginMailboxId(email, index),
+        email,
+      }))
 
       return {
-        id: toSimpleLoginAliasId(entry?.id),
+        id: entry?.id ?? toSimpleLoginAliasId(domainName),
+        creation_timestamp: toUnixTimestamp(entry?.createdAt ?? entry?.created_at),
         domain_name: domainName,
+        name: null,
         // Upstream does not expose a reliable verification flag for custom domains.
         is_verified: true,
-        nb_alias: aliasCounts.get(domainName) ?? 0,
+        nb_alias: domainBindings.length,
+        random_prefix_generation: false,
+        mailboxes,
+        catch_all: typeof entry?.catch_all === 'boolean'
+          ? entry.catch_all
+          : typeof entry?.catchAll === 'boolean' ? entry.catchAll : false,
       }
     })
     : []
@@ -1310,23 +1324,9 @@ function countAliasesByRealAddress(bindings) {
   return counts
 }
 
-/**
- * Counts how many aliases currently use each domain, keyed by the lowercase domain
- * name parsed out of each binding's proxy address.
- */
-function countAliasesByDomain(bindings) {
-  const counts = new Map()
-
-  for (const binding of bindings) {
-    const proxyAddress = String(binding?.attributes?.proxy_address ?? '')
-    const domain = proxyAddress.split('@')[1]?.toLowerCase()
-
-    if (domain) {
-      counts.set(domain, (counts.get(domain) ?? 0) + 1)
-    }
-  }
-
-  return counts
+function getBindingDomain(binding) {
+  const proxyAddress = String(binding?.attributes?.proxy_address ?? '')
+  return proxyAddress.split('@')[1]?.toLowerCase() ?? ''
 }
 
 /**
