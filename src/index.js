@@ -66,6 +66,7 @@ const routes = [
   { method: 'GET', pattern: /^\/api\/setting$/, handler: handleSetting },
   { method: 'PATCH', pattern: /^\/api\/setting$/, handler: handleSettingUpdate },
   { method: 'GET', pattern: /^\/api\/v2\/setting\/domains$/, handler: handleSettingDomainsList },
+  { method: 'GET', pattern: /^\/api\/custom_domains$/, handler: handleCustomDomainsList },
   { method: 'GET', pattern: /^\/api\/v5\/alias\/options$/, handler: handleAliasOptions },
   { method: 'GET', pattern: /^\/api\/v2\/aliases$/, handler: handleAliasesList },
   { method: 'GET', pattern: /^\/api\/v2\/mailboxes$/, handler: handleMailboxesList },
@@ -281,6 +282,41 @@ async function handleSettingDomainsList(request, env) {
   ])
 
   return json(domains)
+}
+
+/**
+ * Lists only the custom domains configured on the account, in the SimpleLogin
+ * /api/custom_domains shape, including the current alias count per domain.
+ */
+async function handleCustomDomainsList(request, env) {
+  // Unlike /api/v2/setting/domains, this endpoint must only report custom domains
+  // (not ProxiedMail's built-in ones), so we skip the available-domains fetch
+  // entirely and just enrich each custom domain with its live alias count.
+  const [customDomainsResponse, bindingsResponse] = await Promise.all([
+    proxiedmailFetchOrThrow(request, env, '/gapi/custom-domains?ignoreProcessing=1', { authMode: 'bearer' }),
+    proxiedmailFetchOrThrow(request, env, '/api/v1/proxy-bindings?sort=desc', { authMode: 'token' }),
+  ])
+  const [customDomainsBody, bindingsBody] = await Promise.all([
+    customDomainsResponse.json(),
+    bindingsResponse.json(),
+  ])
+
+  const aliasCounts = countAliasesByDomain(Array.isArray(bindingsBody?.data) ? bindingsBody.data : [])
+  const customDomains = Array.isArray(customDomainsBody)
+    ? customDomainsBody.map(entry => {
+      const domainName = String(entry?.domain_name ?? entry?.domain ?? '').trim().toLowerCase()
+
+      return {
+        id: toSimpleLoginAliasId(entry?.id),
+        domain_name: domainName,
+        // Upstream does not expose a reliable verification flag for custom domains.
+        is_verified: true,
+        nb_alias: aliasCounts.get(domainName) ?? 0,
+      }
+    })
+    : []
+
+  return json({ custom_domains: customDomains })
 }
 
 /**
@@ -1268,6 +1304,25 @@ function countAliasesByRealAddress(bindings) {
   for (const binding of bindings) {
     for (const entry of normalizeRealAddresses(binding?.attributes?.real_addresses)) {
       counts.set(entry.email, (counts.get(entry.email) ?? 0) + 1)
+    }
+  }
+
+  return counts
+}
+
+/**
+ * Counts how many aliases currently use each domain, keyed by the lowercase domain
+ * name parsed out of each binding's proxy address.
+ */
+function countAliasesByDomain(bindings) {
+  const counts = new Map()
+
+  for (const binding of bindings) {
+    const proxyAddress = String(binding?.attributes?.proxy_address ?? '')
+    const domain = proxyAddress.split('@')[1]?.toLowerCase()
+
+    if (domain) {
+      counts.set(domain, (counts.get(domain) ?? 0) + 1)
     }
   }
 
