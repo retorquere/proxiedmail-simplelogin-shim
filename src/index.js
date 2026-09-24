@@ -314,7 +314,7 @@ async function handleCustomDomainsList(request, env) {
       }))
 
       return {
-        id: entry?.id ?? toSimpleLoginAliasId(domainName),
+        id: toSimpleLoginAliasId(entry?.id ?? domainName),
         creation_timestamp: toUnixTimestamp(entry?.createdAt ?? entry?.created_at),
         domain_name: domainName,
         name: null,
