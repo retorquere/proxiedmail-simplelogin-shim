@@ -7,15 +7,31 @@ The goal is pragmatic app compatibility rather than a full reimplementation of t
 ## Supported routes
 
 - `GET /`
+- `POST /api/auth/activate`
+- `POST /api/auth/forgot_password`
 - `POST /api/auth/login`
+- `POST /api/auth/mfa`
+- `POST /api/auth/reactivate`
+- `POST /api/auth/register`
+- `GET /api/stats`
 - `GET /api/user_info`
+- `PATCH /api/user_info`
 - `GET /api/setting`
 - `PATCH /api/setting`
 - `GET /api/v2/setting/domains`
+- `DELETE /api/user`
+- `PATCH /api/sudo`
+- `GET /api/custom_domains`
+- `GET /api/custom_domains/:domain_id/trash`
+- `PATCH /api/custom_domains/:domain_id`
 - `GET /api/v5/alias/options`
 - `GET /api/v2/aliases`
 - `POST /api/v2/aliases`
 - `GET /api/v2/mailboxes`
+- `POST /api/mailboxes`
+- `PUT /api/mailboxes/:mailbox_id`
+- `DELETE /api/mailboxes/:mailbox_id`
+- `GET /api/aliases/:alias_id`
 - `POST /api/alias/random/new`
 - `POST /api/v3/alias/custom/new`
 - `PATCH /api/aliases/:alias_id`
@@ -23,6 +39,8 @@ The goal is pragmatic app compatibility rather than a full reimplementation of t
 - `GET /api/aliases/:alias_id/activities`
 - `GET /api/aliases/:alias_id/contacts`
 - `POST /api/aliases/:alias_id/contacts`
+- `DELETE /api/contacts/:contact_id`
+- `POST /api/contacts/:contact_id/toggle`
 - `POST /api/aliases/:alias_id/toggle`
 - `DELETE /api/aliases/:alias_id`
 
@@ -47,7 +65,7 @@ The shim reads the incoming `Authentication` header used by SimpleLogin clients.
 
 - For proxiedmail token-authenticated endpoints, it forwards the value as `Token`.
 - For proxiedmail bearer-authenticated endpoints, it forwards the same value as `Authorization: Bearer ...`.
-- `POST /api/auth/login` exchanges SimpleLogin-style email/password credentials for a proxiedmail API token and returns a SimpleLogin-style login payload.
+- `POST /api/auth/login` is a no-op for compatibility. If the request includes an `Authentication` or `Authorization` token, it is preserved as `api_key` in the response.
 
 ## Local development
 

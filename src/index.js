@@ -7,7 +7,7 @@
  * ProxiedMail service while re-shaping the response payloads to match the
  * SimpleLogin format the client already knows.
  */
-import NameModel from './name_model.json'
+import NameModel from './name_model.json' with { type: 'json' }
 
 /**
  * Standard empty envelope used for unhandled or unsupported routes.
@@ -61,21 +61,33 @@ export default {
  */
 const routes = [
   { method: 'GET', pattern: /^\/$/, handler: handleRoot },
-  { method: 'POST', pattern: /^\/api\/auth\/login$/, handler: handleAuthLogin },
+  { method: 'POST', pattern: /^\/api\/auth\/(?:activate|forgot_password|login|mfa|reactivate|register)$/, handler: handleAuthNoop },
+  { method: 'GET', pattern: /^\/api\/stats$/, handler: handleStats },
   { method: 'GET', pattern: /^\/api\/user_info$/, handler: handleRoot },
+  { method: 'PATCH', pattern: /^\/api\/user_info$/, handler: handleNoop },
   { method: 'GET', pattern: /^\/api\/setting$/, handler: handleSetting },
   { method: 'PATCH', pattern: /^\/api\/setting$/, handler: handleSettingUpdate },
   { method: 'GET', pattern: /^\/api\/v2\/setting\/domains$/, handler: handleSettingDomainsList },
+  { method: 'DELETE', pattern: /^\/api\/user$/, handler: handleNoop },
+  { method: 'PATCH', pattern: /^\/api\/sudo$/, handler: handleNoop },
   { method: 'GET', pattern: /^\/api\/custom_domains$/, handler: handleCustomDomainsList },
+  { method: 'GET', pattern: /^\/api\/custom_domains\/([^/]+)\/trash$/, handler: handleCustomDomainTrash },
+  { method: 'PATCH', pattern: /^\/api\/custom_domains\/([^/]+)$/, handler: handleNoop },
   { method: 'GET', pattern: /^\/api\/v5\/alias\/options$/, handler: handleAliasOptions },
   { method: 'GET', pattern: /^\/api\/v2\/aliases$/, handler: handleAliasesList },
   { method: 'GET', pattern: /^\/api\/v2\/mailboxes$/, handler: handleMailboxesList },
+  { method: 'POST', pattern: /^\/api\/mailboxes$/, handler: handleNoop },
+  { method: 'PUT', pattern: /^\/api\/mailboxes\/([^/]+)$/, handler: handleNoop },
+  { method: 'DELETE', pattern: /^\/api\/mailboxes\/([^/]+)$/, handler: handleNoop },
   { method: 'POST', pattern: /^\/api\/v2\/aliases$/, handler: handleAliasesList },
+  { method: 'GET', pattern: /^\/api\/aliases\/([^/]+)$/, handler: handleAliasGet },
   { method: 'PATCH', pattern: /^\/api\/aliases\/([^/]+)$/, handler: handleAliasUpdate },
   { method: 'PUT', pattern: /^\/api\/aliases\/([^/]+)$/, handler: handleAliasUpdate },
   { method: 'GET', pattern: /^\/api\/aliases\/([^/]+)\/activities$/, handler: handleAliasActivities },
   { method: 'GET', pattern: /^\/api\/aliases\/([^/]+)\/contacts$/, handler: handleAliasContactsList },
   { method: 'POST', pattern: /^\/api\/aliases\/([^/]+)\/contacts$/, handler: handleAliasContactCreate },
+  { method: 'DELETE', pattern: /^\/api\/contacts\/([^/]+)$/, handler: handleNoop },
+  { method: 'POST', pattern: /^\/api\/contacts\/([^/]+)\/toggle$/, handler: handleNoop },
   { method: 'POST', pattern: /^\/api\/alias\/random\/new$/, handler: handleRandomAliasCreate },
   { method: 'POST', pattern: /^\/api\/v3\/alias\/custom\/new$/, handler: handleCustomAliasCreate },
   { method: 'POST', pattern: /^\/api\/aliases\/([^/]+)\/toggle$/, handler: handleAliasToggle },
@@ -141,82 +153,77 @@ async function handleRoot(request, env) {
 }
 
 /**
- * Implements the SimpleLogin login endpoint by exchanging the caller's email and
- * password against ProxiedMail's auth service, then fetching the user profile and
- * an API token to return a SimpleLogin-style payload.
+ * Authentication and account lifecycle calls are intentionally local no-ops.
+ * Returning the submitted email keeps login useful to clients without requiring
+ * credentials that the shim cannot validate or persist.
  */
-async function handleAuthLogin(request, env) {
-  // SimpleLogin clients send { email, password } in the request body, while
-  // ProxiedMail expects a nested auth request under data.attributes.username and
-  // data.attributes.password. We unwrap the SimpleLogin payload, call ProxiedMail's
-  // /api/v1/auth, then immediately request both a new API token and the current
-  // user profile. The final response is flattened back into the SimpleLogin shape:
-  // username/email are taken from the profile and api_key is the token returned by
-  // the ProxiedMail API token endpoint.
-  const payload = await readJsonBody(request)
+async function handleAuthNoop(request) {
+  let payload = {}
+  try {
+    payload = await readJsonBody(request)
+  }
+  catch {
+    // Authentication is deliberately non-validating, so malformed input is also
+    // treated as a successful no-op.
+  }
   const email = String(payload?.email ?? '').trim()
-  const password = String(payload?.password ?? '')
-
-  if (!email || !password) {
-    return json({ error: 'Email or password incorrect' }, 400)
-  }
-
-  const authResponse = await fetch(`${String(env.PROXIEDMAIL_BASE_URL || 'https://proxiedmail.com').replace(/\/$/, '')}/api/v1/auth`, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      data: {
-        type: 'auth-request',
-        attributes: {
-          username: email,
-          password,
-        },
-      },
-    }),
-  })
-
-  if (!authResponse.ok) {
-    return json({ error: 'Email or password incorrect' }, authResponse.status >= 400 && authResponse.status < 500 ? 400 : authResponse.status)
-  }
-
-  const authBody = await authResponse.json()
-  const bearerToken = authBody?.data?.attributes?.token
-  if (!bearerToken) {
-    return json({ error: 'Email or password incorrect' }, 400)
-  }
-
-  const [apiTokenResponse, profileResponse] = await Promise.all([
-    fetch(`${String(env.PROXIEDMAIL_BASE_URL || 'https://proxiedmail.com').replace(/\/$/, '')}/api/v1/api-token`, {
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${bearerToken}`,
-      },
-    }),
-    fetch(`${String(env.PROXIEDMAIL_BASE_URL || 'https://proxiedmail.com').replace(/\/$/, '')}/api/v1/users/me?updateFrontCache=0`, {
-      headers: {
-        Accept: 'application/json',
-        Token: bearerToken,
-      },
-    }),
-  ])
-
-  if (!apiTokenResponse.ok) {
-    return relayError(apiTokenResponse)
-  }
-
-  const apiTokenBody = await apiTokenResponse.json()
-  const profileBody = profileResponse.ok ? await profileResponse.json() : null
+  const incomingToken = request.headers.get('Authentication')
+    || request.headers.get('Authorization')
+    || payload?.token
+    || payload?.api_key
+    || 'sl-shim'
+  const apiKey = String(incomingToken).replace(/^(?:Bearer|Token)\s+/i, '').trim()
 
   return json({
-    name: profileBody?.data?.attributes?.username ?? '',
-    email: profileBody?.data?.attributes?.email ?? email,
+    name: email,
+    email,
     mfa_enabled: false,
     mfa_key: '',
-    api_key: apiTokenBody?.token ?? '',
+    api_key: apiKey || 'sl-shim',
   })
+}
+
+/**
+ * Account mutations that have no reliable ProxiedMail equivalent are successful
+ * no-ops. A JSON object is returned because several Retrofit calls parse a body.
+ */
+async function handleNoop() {
+  return json({})
+}
+
+/**
+ * Reports useful alias statistics from the same binding list used by the alias UI.
+ * Counters unavailable from ProxiedMail remain deterministic zeroes.
+ */
+async function handleStats(request, env) {
+  const response = await proxiedmailFetchOrThrow(request, env, '/api/v1/proxy-bindings?sort=desc', {
+    authMode: 'token',
+  })
+  const body = await response.json()
+  const aliases = Array.isArray(body?.data) ? body.data : []
+
+  return json({
+    nb_alias: aliases.length,
+    nb_forward: aliases.reduce((total, alias) => total + Number(alias?.attributes?.received_emails ?? 0), 0),
+    nb_reply: 0,
+    nb_block: 0,
+  })
+}
+
+/**
+ * Returns a single alias using the same identifier resolution as update/delete.
+ */
+async function handleAliasGet(request, env, _url, params) {
+  const binding = await getProxyBindingById(request, env, params[0])
+  return json(toSimpleLoginAlias(binding))
+}
+
+/**
+ * ProxiedMail does not expose deleted aliases by custom domain, so return a valid
+ * empty collection rather than making the client fail on an unsupported read.
+ */
+async function handleCustomDomainTrash() {
+  return json({ aliases: [] })
 }
 
 /**
